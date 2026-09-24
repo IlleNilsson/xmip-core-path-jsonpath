@@ -31,11 +31,11 @@ pub use eval::{Location, Place, at, at_mut, locate};
 pub use parser::parse;
 pub use query::{Comparison, Filter, Query, Segment, Selector, Step};
 
-use path::json::{self, Document, Rewrite};
-use path::{Path, PathCost, PathEngine};
-use sdk::contract::{
+use contract::{
     ContractDescriptor, ContractError, StructureReader, StructureWriter, StructuredValue,
 };
+use path::json::{self, Document, Rewrite};
+use path::{Path, PathCost, PathEngine};
 use stream::Stream;
 use xcore::StreamId;
 
