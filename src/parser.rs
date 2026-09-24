@@ -3,7 +3,7 @@
 //! own errors is worth more than a generated one here.
 
 use crate::query::{Comparison, Filter, Query, Segment, Selector, Step};
-use contract::ContractError;
+use sdk::contract::ContractError;
 use serde_json::Value;
 
 /// Parse `text` as a query.
