@@ -3,6 +3,7 @@
 //! own errors is worth more than a generated one here.
 
 use crate::query::{Comparison, Filter, Query, Segment, Selector, Step};
+use codec::char_reader::CharReader;
 use contract::ContractError;
 use serde_json::Value;
 
@@ -12,58 +13,52 @@ use serde_json::Value;
 /// The text does not start with `$`, or a segment, selector, string, number
 /// or filter in it is malformed; the message names the offset.
 pub fn parse(text: &str) -> Result<Query, ContractError> {
-    let mut parser = Parser { text, at: 0 };
+    let mut parser = Parser {
+        reader: CharReader::new(text),
+    };
     parser.expect('$')?;
     let mut segments = Vec::new();
-    while !parser.done() {
+    while !parser.reader.is_done() {
         segments.push(parser.segment()?);
     }
     Ok(Query { segments })
 }
 
 struct Parser<'a> {
-    text: &'a str,
-    at: usize,
+    reader: CharReader<'a>,
 }
 
 impl Parser<'_> {
-    fn done(&self) -> bool {
-        self.at >= self.text.len()
-    }
-
-    fn rest(&self) -> &str {
-        &self.text[self.at..]
-    }
-
     fn peek(&self) -> Option<char> {
-        self.rest().chars().next()
+        self.reader.peek()
     }
 
     fn take(&mut self, prefix: &str) -> bool {
-        let found = self.rest().starts_with(prefix);
-        if found {
-            self.at += prefix.len();
-        }
-        found
+        self.reader.eat_str(prefix)
     }
 
     fn expect(&mut self, symbol: char) -> Result<(), ContractError> {
-        if self.take(symbol.encode_utf8(&mut [0; 4])) {
+        if self.reader.eat(symbol) {
             Ok(())
         } else {
             Err(self.refuse(&format!("expected {symbol:?}")))
         }
     }
 
+    /// RFC 9535 blank space: space, tab, line feed and carriage return, and
+    /// nothing else.
     fn skip_space(&mut self) {
-        while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
-            self.at += 1;
-        }
+        self.reader
+            .take_while(|symbol| matches!(symbol, ' ' | '\t' | '\n' | '\r'));
     }
 
     fn refuse(&self, why: &str) -> ContractError {
         ContractError {
-            message: format!("query {:?} at {}: {why}", self.text, self.at),
+            message: format!(
+                "query {:?} at {}: {why}",
+                self.reader.text(),
+                self.reader.offset()
+            ),
         }
     }
 
@@ -91,19 +86,16 @@ impl Parser<'_> {
         Ok(vec![Selector::Name(self.name()?)])
     }
 
+    /// A member name: letters, digits, `_` and every character outside
+    /// ASCII, as RFC 9535 `name-char` has it.
     fn name(&mut self) -> Result<String, ContractError> {
-        let start = self.at;
-        while let Some(symbol) = self.peek() {
-            if symbol.is_alphanumeric() || symbol == '_' || !symbol.is_ascii() {
-                self.at += symbol.len_utf8();
-            } else {
-                break;
-            }
-        }
-        if self.at == start {
+        let name = self
+            .reader
+            .take_while(|symbol| symbol.is_alphanumeric() || symbol == '_' || !symbol.is_ascii());
+        if name.is_empty() {
             return Err(self.refuse("expected a name"));
         }
-        Ok(self.text[start..self.at].to_string())
+        Ok(name.to_string())
     }
 
     fn bracketed(&mut self) -> Result<Vec<Selector>, ContractError> {
@@ -125,11 +117,11 @@ impl Parser<'_> {
         match self.peek() {
             Some('\'' | '"') => Ok(Selector::Name(self.quoted()?)),
             Some('*') => {
-                self.at += 1;
+                self.reader.bump();
                 Ok(Selector::Wildcard)
             }
             Some('?') => {
-                self.at += 1;
+                self.reader.bump();
                 Ok(Selector::Filter(self.filter()?))
             }
             Some(symbol) if symbol == '-' || symbol == ':' || symbol.is_ascii_digit() => {
@@ -140,12 +132,10 @@ impl Parser<'_> {
     }
 
     fn integer(&mut self) -> Result<Option<i64>, ContractError> {
-        let start = self.at;
+        let start = self.reader.offset();
         self.take("-");
-        while self.peek().is_some_and(|symbol| symbol.is_ascii_digit()) {
-            self.at += 1;
-        }
-        let token = &self.text[start..self.at];
+        self.reader.take_while(|symbol| symbol.is_ascii_digit());
+        let token = self.reader.since(start);
         if token.is_empty() {
             return Ok(None);
         }
@@ -177,15 +167,14 @@ impl Parser<'_> {
 
     fn quoted(&mut self) -> Result<String, ContractError> {
         let quote = self
-            .peek()
+            .reader
+            .bump()
             .ok_or_else(|| self.refuse("expected a string"))?;
-        self.at += 1;
         let mut out = String::new();
         loop {
-            let Some(symbol) = self.peek() else {
+            let Some(symbol) = self.reader.bump() else {
                 return Err(self.refuse("a string is never closed"));
             };
-            self.at += symbol.len_utf8();
             if symbol == quote {
                 return Ok(out);
             }
@@ -193,10 +182,9 @@ impl Parser<'_> {
                 out.push(symbol);
                 continue;
             }
-            let Some(escaped) = self.peek() else {
+            let Some(escaped) = self.reader.bump() else {
                 return Err(self.refuse("a string is never closed"));
             };
-            self.at += escaped.len_utf8();
             out.push(match escaped {
                 'n' => '\n',
                 't' => '\t',
@@ -271,14 +259,9 @@ impl Parser<'_> {
         if matches!(self.peek(), Some('\'' | '"')) {
             return Ok(Value::String(self.quoted()?));
         }
-        let start = self.at;
-        while self
-            .peek()
-            .is_some_and(|symbol| symbol.is_ascii_digit() || "-+.eE".contains(symbol))
-        {
-            self.at += 1;
-        }
-        let token = &self.text[start..self.at];
+        let token = self
+            .reader
+            .take_while(|symbol| symbol.is_ascii_digit() || "-+.eE".contains(symbol));
         serde_json::from_str(token)
             .ok()
             .filter(Value::is_number)
@@ -397,6 +380,35 @@ mod tests {
             "$[?@.a == nope]",
             "$[?@[]]",
             "$..",
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn multibyte_names_strings_and_space_parse_without_panic() {
+        assert_eq!(
+            segments("$.größe['Zoë 名前'][?@.naïve == '\u{a0}é']"),
+            vec![
+                Segment::Child(vec![Selector::Name("größe".into())]),
+                Segment::Child(vec![Selector::Name("Zoë 名前".into())]),
+                Segment::Child(vec![Selector::Filter(Filter {
+                    path: vec![Step::Member("naïve".into())],
+                    test: Some((Comparison::Eq, json!("\u{a0}é"))),
+                })]),
+            ]
+        );
+        // RFC 9535 name-char takes every character outside ASCII, U+00A0
+        // among them; blank space is four ASCII characters only.
+        assert_eq!(
+            segments("$.a\u{a0}b"),
+            vec![Segment::Child(vec![Selector::Name("a\u{a0}b".into())])]
+        );
+        for bad in [
+            "$[\u{a0}0]",
+            "$[0\u{3000}]",
+            "$['open\u{a0}",
+            "$[?@.a ==\u{a0}1]",
         ] {
             assert!(parse(bad).is_err(), "{bad:?} should be refused");
         }
