@@ -7,16 +7,14 @@
 //! and descendant segments (`..name`, `..[*]`). A query may select many nodes;
 //! a read takes the first in document order, and a write replaces every one.
 //!
-//! Three things, because a path language is nothing without content to address:
-//! [`JsonPathEngine`], the [`PathEngine`] for the language `jsonpath`;
-//! [`JsonPathStructure`], a [`StructureReader`] over a JSON Stream; and
-//! [`JsonPathRewrite`], a [`StructureWriter`] that produces a new Stream with
-//! every selected value replaced, as ADR-0013 asks of anything that changes
-//! content. Promote reads through the first two; demote writes through the
-//! first and third; route and process read. The JSON document itself — parsed
-//! once, bridged to a scalar, written back as a Stream — is the capability's
-//! `json`, shared with the other JSON languages (ADR-0044); what is this
-//! technology's is the query.
+//! [`JsonPathLanguage`] is the [`PathLanguage`] `jsonpath`: it compiles a
+//! query once, and the compiled [`Query`] reads the first match from a
+//! Stream's JSON and writes every match in a rewrite of it (ADR-0013).
+//! Promote reads through it; demote writes through it; route and process
+//! read. The JSON document itself — parsed once per Message, bridged to a
+//! scalar, written back as a Stream — is the capability's `json`, shared with
+//! the other JSON languages (ADR-0044); what is this technology's is the
+//! query.
 //!
 //! A value read is a scalar — null, boolean, number, string — and an object or
 //! array at the first match is refused rather than stringified, because a
@@ -31,132 +29,70 @@ pub use eval::{Location, Place, at, at_mut, locate};
 pub use parser::parse;
 pub use query::{Comparison, Filter, Query, Segment, Selector, Step};
 
-use contract::{
-    ContractDescriptor, ContractError, StructureReader, StructureWriter, StructuredValue,
-};
-use path::json::{self, Document, Rewrite};
-use path::{Path, PathCost, PathEngine};
-use stream::Stream;
-use xcore::StreamId;
+use contract::ContractError;
+use path::{CompiledExpression, Content, PathLanguage, Rewriting, json};
+use serde_json::Value;
+use xcore::ScalarValue;
 
-/// The `jsonpath` engine. The reader speaks queries already, so the engine
-/// adds no traversal of its own.
-pub struct JsonPathEngine;
+/// The language `jsonpath`.
+pub struct JsonPathLanguage;
 
-impl PathEngine for JsonPathEngine {
+impl PathLanguage for JsonPathLanguage {
     fn language(&self) -> &'static str {
         "jsonpath"
     }
 
-    fn read(
-        &self,
-        reader: &dyn StructureReader,
-        path: &Path,
-    ) -> Result<Option<StructuredValue>, ContractError> {
-        reader.read(&path.expression)
-    }
-
-    fn write(
-        &self,
-        writer: &mut dyn StructureWriter,
-        path: &Path,
-        value: StructuredValue,
-    ) -> Result<(), ContractError> {
-        writer.write(&path.expression, value)
-    }
-
-    /// A descendant or filter segment can only be answered against the whole
-    /// document, and JSON has no prefix a plain one can be read from either.
-    fn cost(&self, _path: &Path) -> PathCost {
-        PathCost::Materialized
+    fn compile(&self, expression: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
+        Ok(Box::new(Compiled {
+            query: parse(expression)?,
+            expression: expression.to_string(),
+        }))
     }
 }
 
-/// A JSON Stream, read by query.
-pub struct JsonPathStructure {
-    document: Document,
+/// A query compiled, with the text a refusal names.
+struct Compiled {
+    query: Query,
+    expression: String,
 }
 
-impl JsonPathStructure {
-    /// Parse `stream` once; every read is a query evaluation after that.
-    ///
-    /// # Errors
-    /// The Stream is not JSON.
-    pub fn parse(stream: &Stream) -> Result<Self, ContractError> {
-        Ok(Self {
-            document: Document::parse(stream)?,
-        })
-    }
-}
-
-impl StructureReader for JsonPathStructure {
-    fn contract(&self) -> &ContractDescriptor {
-        &self.document.descriptor
-    }
-
-    fn read(&self, path: &str) -> Result<Option<StructuredValue>, ContractError> {
-        let query = parse(path)?;
-        let value = &self.document.value;
-        locate(value, &query)
+impl CompiledExpression for Compiled {
+    fn read(&self, content: &Content<'_>) -> Result<Option<ScalarValue>, ContractError> {
+        let document = content.form::<Value>()?;
+        locate(&document, &self.query)
             .first()
-            .and_then(|location| at(value, location))
-            .map(|found| json::scalar(found, path))
+            .and_then(|location| at(&document, location))
+            .map(|found| json::scalar(found, &self.expression))
             .transpose()
     }
-}
 
-/// A JSON Stream being rewritten into a new one.
-pub struct JsonPathRewrite {
-    rewrite: Rewrite,
-}
-
-impl JsonPathRewrite {
-    /// Start from `stream`; the Stream `finish` produces carries `id`.
-    ///
-    /// # Errors
-    /// The Stream is not JSON.
-    pub fn of(stream: &Stream, id: StreamId) -> Result<Self, ContractError> {
-        Ok(Self {
-            rewrite: Rewrite::of(stream, id)?,
-        })
-    }
-}
-
-impl StructureWriter for JsonPathRewrite {
-    fn contract(&self) -> &ContractDescriptor {
-        &self.rewrite.descriptor
-    }
-
-    /// Replace the value at every node `path` selects. Nothing selected is
+    /// Replace the value at every node the query selects. Nothing selected is
     /// refused. Where one selected node lies inside another, the outer
     /// replacement stands.
-    fn write(&mut self, path: &str, value: StructuredValue) -> Result<(), ContractError> {
-        let query = parse(path)?;
+    fn write(&self, rewriting: &mut Rewriting, value: ScalarValue) -> Result<(), ContractError> {
         let replacement = json::from_scalar(value)?;
-        let locations = locate(&self.rewrite.value, &query);
+        let document = rewriting.form_mut::<Value>()?;
+        let locations = locate(document, &self.query);
         if locations.is_empty() {
             return Err(ContractError::new(format!(
-                "{path:?} selects nothing to write into"
+                "{:?} selects nothing to write into",
+                self.expression
             )));
         }
         for location in locations.iter().rev() {
-            if let Some(node) = at_mut(&mut self.rewrite.value, location) {
+            if let Some(node) = at_mut(document, location) {
                 *node = replacement.clone();
             }
         }
         Ok(())
-    }
-
-    fn finish(self: Box<Self>) -> Result<Stream, ContractError> {
-        self.rewrite.finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use path::fixture::stream;
-    use serde_json::Value;
+    use contract::fixture::stream;
+    use xcore::StreamId;
 
     const STORE: &str = concat!(
         r#"{"store":{"book":["#,
@@ -166,38 +102,42 @@ mod tests {
         r#""bicycle":{"color":"red","price":19.95,"stock":3}}}"#
     );
 
+    fn compiled(query: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
+        JsonPathLanguage.compile(query)
+    }
+
     #[test]
     fn reads_the_first_scalar_match_and_refuses_structures() {
-        let structure = JsonPathStructure::parse(&stream(STORE)).expect("parses");
-        let engine = JsonPathEngine;
-        let read = |p: &str| engine.read(&structure, &Path::new("jsonpath", p));
+        let store = stream(STORE);
+        let content = Content::of(&store);
+        let read = |p: &str| compiled(p)?.read(&content);
         assert_eq!(
             read("$.store.bicycle.color").expect("reads"),
-            Some(StructuredValue::Text("red".into()))
+            Some(ScalarValue::Text("red".into()))
         );
         assert_eq!(
             read("$.store.bicycle.stock").expect("reads"),
-            Some(StructuredValue::Integer(3))
+            Some(ScalarValue::Integer(3))
         );
         assert_eq!(
             read("$.store.book[-1].price").expect("reads"),
-            Some(StructuredValue::Decimal(22.99))
+            Some(ScalarValue::Decimal(22.99))
         );
         assert_eq!(
             read("$..isbn").expect("reads"),
-            Some(StructuredValue::Text("0-553".into()))
+            Some(ScalarValue::Text("0-553".into()))
         );
         assert_eq!(
             read("$.store.book[1:].title").expect("reads"),
-            Some(StructuredValue::Text("Moby".into()))
+            Some(ScalarValue::Text("Moby".into()))
         );
         assert_eq!(
             read("$.store.book[?@.price > 20].title").expect("reads"),
-            Some(StructuredValue::Text("Lord".into()))
+            Some(ScalarValue::Text("Lord".into()))
         );
         assert_eq!(
             read("$.store.book[*].title").expect("reads"),
-            Some(StructuredValue::Text("Sayings".into()))
+            Some(ScalarValue::Text("Sayings".into()))
         );
         assert_eq!(
             read("$.store.book[?@.price > 100].title").expect("reads"),
@@ -208,27 +148,22 @@ mod tests {
         assert!(read("$").is_err());
         assert!(read("store.book").is_err());
         assert!(read("$.store.book[?@.price >]").is_err());
-        assert_eq!(
-            engine.cost(&Path::new("jsonpath", "$.store")),
-            PathCost::Materialized
-        );
     }
 
     #[test]
     fn rewrites_every_match_into_a_new_stream_with_the_given_id() {
-        let mut rewrite = JsonPathRewrite::of(&stream(STORE), StreamId::new(2)).expect("parses");
-        let engine = JsonPathEngine;
+        let mut rewriting = Rewriting::of(&stream(STORE), StreamId::new(2));
         let mut write =
-            |p: &str, v: StructuredValue| engine.write(&mut rewrite, &Path::new("jsonpath", p), v);
-        write("$.store.book[*].price", StructuredValue::Integer(1)).expect("writes all");
-        write("$..color", StructuredValue::Text("blue".into())).expect("writes");
-        write("$.store.book[?@.isbn].isbn", StructuredValue::Null).expect("writes");
-        write("$.store.bicycle", StructuredValue::Bool(false)).expect("writes a structure");
-        assert!(write("$.store.nothing", StructuredValue::Integer(0)).is_err());
-        assert!(write("$.store.book[9].price", StructuredValue::Integer(0)).is_err());
-        assert!(write("$.store", StructuredValue::Binary(vec![1])).is_err());
-        assert!(write("$[", StructuredValue::Null).is_err());
-        let out = Box::new(rewrite).finish().expect("finishes");
+            |p: &str, v: ScalarValue| compiled(p).and_then(|c| c.write(&mut rewriting, v));
+        write("$.store.book[*].price", ScalarValue::Integer(1)).expect("writes all");
+        write("$..color", ScalarValue::Text("blue".into())).expect("writes");
+        write("$.store.book[?@.isbn].isbn", ScalarValue::Null).expect("writes");
+        write("$.store.bicycle", ScalarValue::Bool(false)).expect("writes a structure");
+        assert!(write("$.store.nothing", ScalarValue::Integer(0)).is_err());
+        assert!(write("$.store.book[9].price", ScalarValue::Integer(0)).is_err());
+        assert!(write("$.store", ScalarValue::Binary(vec![1])).is_err());
+        assert!(write("$[", ScalarValue::Null).is_err());
+        let out = rewriting.finish().expect("finishes");
         assert_eq!(out.id(), StreamId::new(2));
         assert_eq!(out.media_type(), Some("application/json"));
         let back: Value = serde_json::from_slice(out.bytes()).expect("json");
@@ -243,8 +178,17 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_that_is_not_json_is_refused_up_front() {
-        assert!(JsonPathStructure::parse(&stream("{nope")).is_err());
-        assert!(JsonPathRewrite::of(&stream("{nope"), StreamId::new(1)).is_err());
+    fn a_stream_that_is_not_json_is_refused() {
+        let broken = stream("{nope");
+        let query = compiled("$.a").expect("compiles");
+        assert!(query.read(&Content::of(&broken)).is_err());
+        assert!(
+            query
+                .write(
+                    &mut Rewriting::of(&broken, StreamId::new(1)),
+                    ScalarValue::Null
+                )
+                .is_err()
+        );
     }
 }
