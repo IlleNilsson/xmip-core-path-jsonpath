@@ -5,6 +5,8 @@ descendant, index, slice, wildcard and filter selectors — the first match read
 every match written, for promote, demote, route and process. A technology of
 [xmip-core-path](https://github.com/IlleNilsson/xmip-core-path).
 
+`JsonPathLanguage` is the `PathLanguage` for the language `jsonpath`: a query compiles once, and the JSON a Message carries is parsed once for every JSON path reading it.
+
 A query is read through `xmip-core-library-codec`'s character reader. Blank
 space is the four ASCII characters RFC 9535 names, and a member name takes
 every character outside ASCII, as its `name-char` does.
