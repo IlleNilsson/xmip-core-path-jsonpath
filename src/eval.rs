@@ -139,10 +139,10 @@ fn normal(index: i64, len: usize) -> Option<usize> {
     usize::try_from(position).ok()
 }
 
-/// RFC 9535 section 2.3.4.2.2, bounds normalised and clamped before stepping.
+/// RFC 9535 section 2.3.4.2.2, bounds normalized and clamped before stepping.
 fn slice(items: &[Value], start: Option<i64>, end: Option<i64>, step: i64) -> Vec<(Place, &Value)> {
     let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
-    let normalise = |index: i64| if index < 0 { len + index } else { index };
+    let normalize = |index: i64| if index < 0 { len + index } else { index };
     let mut out = Vec::new();
     let mut push = |position: i64| {
         if let Some(at) = usize::try_from(position)
@@ -153,16 +153,16 @@ fn slice(items: &[Value], start: Option<i64>, end: Option<i64>, step: i64) -> Ve
         }
     };
     if step > 0 {
-        let lower = normalise(start.unwrap_or(0)).clamp(0, len);
-        let upper = normalise(end.unwrap_or(len)).clamp(0, len);
+        let lower = normalize(start.unwrap_or(0)).clamp(0, len);
+        let upper = normalize(end.unwrap_or(len)).clamp(0, len);
         let mut position = lower;
         while position < upper {
             push(position);
             position += step;
         }
     } else if step < 0 {
-        let upper = normalise(start.unwrap_or(len - 1)).clamp(-1, len - 1);
-        let lower = normalise(end.unwrap_or(-len - 1)).clamp(-1, len - 1);
+        let upper = normalize(start.unwrap_or(len - 1)).clamp(-1, len - 1);
+        let lower = normalize(end.unwrap_or(-len - 1)).clamp(-1, len - 1);
         let mut position = upper;
         while position > lower {
             push(position);
@@ -328,14 +328,8 @@ mod tests {
             found(&doc, "$.store.book[?@.title < 8.95]"),
             Vec::<Value>::new()
         );
-        assert_eq!(
-            found(&doc, "$.store.book[?@.colour != null].title").len(),
-            3
-        );
-        assert_eq!(
-            found(&doc, "$.store.book[?@.colour == null].title").len(),
-            0
-        );
+        assert_eq!(found(&doc, "$.store.book[?@.color != null].title").len(), 3);
+        assert_eq!(found(&doc, "$.store.book[?@.color == null].title").len(), 0);
         let flags = json!([{"on": true}, {"on": false}, {"on": null}, {"on": 1}]);
         assert_eq!(found(&flags, "$[?@.on == true].on"), vec![json!(true)]);
         assert_eq!(found(&flags, "$[?@.on == null].on"), vec![json!(null)]);
