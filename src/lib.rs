@@ -30,7 +30,7 @@ pub use parser::parse;
 pub use query::{Comparison, Filter, Query, Segment, Selector, Step};
 
 use contract::ContractError;
-use path::{CompiledExpression, Content, PathLanguage, Rewriting, json};
+use path::{CompiledExpression, Content, Namespaces, PathLanguage, Rewriting, json};
 use serde_json::Value;
 use xcore::ScalarValue;
 
@@ -42,7 +42,12 @@ impl PathLanguage for JsonPathLanguage {
         "jsonpath"
     }
 
-    fn compile(&self, expression: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
+    fn compile(
+        &self,
+        expression: &str,
+        namespaces: &Namespaces,
+    ) -> Result<Box<dyn CompiledExpression>, ContractError> {
+        namespaces.unused_by(self.language())?;
         Ok(Box::new(Compiled {
             query: parse(expression)?,
             expression: expression.to_string(),
@@ -103,7 +108,7 @@ mod tests {
     );
 
     fn compiled(query: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
-        JsonPathLanguage.compile(query)
+        JsonPathLanguage.compile(query, &Namespaces::new())
     }
 
     #[test]
@@ -148,6 +153,19 @@ mod tests {
         assert!(read("$").is_err());
         assert!(read("store.book").is_err());
         assert!(read("$.store.book[?@.price >]").is_err());
+    }
+
+    #[test]
+    fn a_path_binding_a_namespace_is_refused_for_json_has_none() {
+        let bound = Namespaces::new().bind("o", "urn:example:order");
+        let refused = JsonPathLanguage
+            .compile("$.store", &bound)
+            .map(drop)
+            .expect_err("refused");
+        assert_eq!(
+            refused.message,
+            "jsonpath has no namespaces, and the path binds o"
+        );
     }
 
     #[test]
