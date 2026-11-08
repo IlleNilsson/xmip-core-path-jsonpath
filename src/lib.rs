@@ -184,7 +184,7 @@ mod tests {
         let out = rewriting.finish().expect("finishes");
         assert_eq!(out.id(), StreamId::new(2));
         assert_eq!(out.media_type(), Some("application/json"));
-        let back: Value = serde_json::from_slice(out.bytes()).expect("json");
+        let back: Value = serde_json::from_slice(out.load().expect("held")).expect("json");
         assert_eq!(
             back,
             serde_json::json!({"store": {"book": [
