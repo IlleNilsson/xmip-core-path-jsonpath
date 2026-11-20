@@ -108,8 +108,7 @@ fn select<'a>(selector: &Selector, node: &'a Value) -> Vec<(Place, &'a Value)> {
         Selector::Name(name) => node
             .as_object()
             .and_then(|members| members.get(name))
-            .map(|member| vec![(Place::Member(name.clone()), member)])
-            .unwrap_or_default(),
+            .map_or_default(|member| vec![(Place::Member(name.clone()), member)]),
         Selector::Index(index) => node
             .as_array()
             .and_then(|items| {
@@ -122,8 +121,7 @@ fn select<'a>(selector: &Selector, node: &'a Value) -> Vec<(Place, &'a Value)> {
         Selector::Wildcard => children(node),
         Selector::Slice { start, end, step } => node
             .as_array()
-            .map(|items| slice(items, *start, *end, step.unwrap_or(1)))
-            .unwrap_or_default(),
+            .map_or_default(|items| slice(items, *start, *end, step.unwrap_or(1))),
         Selector::Filter(filter) => children(node)
             .into_iter()
             .filter(|(_, child)| holds(filter, child))
