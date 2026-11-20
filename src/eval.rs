@@ -253,10 +253,15 @@ mod tests {
             found(&doc, "$.store.book[*].title"),
             vec![json!("Sayings"), json!("Moby"), json!("Lord")]
         );
-        assert_eq!(
-            found(&doc, "$..price"),
-            vec![json!(19.95), json!(8.95), json!(12.99), json!(22.99)]
-        );
+        // An object's members are unordered (RFC 9535 2.5.2.2), and the order
+        // serde_json keeps is its `preserve_order` feature's, which another
+        // crate of the estate's one workspace turns on: compared as a set.
+        let mut prices: Vec<String> = found(&doc, "$..price")
+            .iter()
+            .map(Value::to_string)
+            .collect();
+        prices.sort();
+        assert_eq!(prices, ["12.99", "19.95", "22.99", "8.95"]);
         assert_eq!(found(&doc, "$..isbn"), vec![json!("0-553"), json!("0-395")]);
         assert_eq!(
             found(&doc, "$.store.book[0, -1].title"),
