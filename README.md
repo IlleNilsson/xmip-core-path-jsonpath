@@ -11,11 +11,6 @@ A query is read through `xmip-core-library-codec`'s character reader. Blank
 space is the four ASCII characters RFC 9535 names, and a member name takes
 every character outside ASCII, as its `name-char` does.
 
-## Toolchain
-
-`rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
-here.
-
 ## Verification
 
 The included workflow is manual-only and calls the versioned shared workflow at
